@@ -8,201 +8,243 @@ const ticketCooldowns = new Map();
 
 module.exports = {
     async handleButton(interaction, client) {
-        const { customId, user, guild, member } = interaction;
+        const { customId } = interaction;
         
-        // Create ticket
+        // Create regular ticket
         if (customId === 'create_ticket') {
-            await interaction.deferReply({ flags: 64 }); // 64 = ephemeral flag
-            
-            // Check cooldown per server
-            const now = Date.now();
-            const cooldownAmount = 30 * 1000; // 30 seconds
-            
-            // Get or create cooldown map for this guild
-            if (!ticketCooldowns.has(guild.id)) {
-                ticketCooldowns.set(guild.id, new Map());
-            }
-            const guildCooldowns = ticketCooldowns.get(guild.id);
-            
-            if (guildCooldowns.has(user.id)) {
-                const expirationTime = guildCooldowns.get(user.id) + cooldownAmount;
-                
-                if (now < expirationTime) {
-                    const timeLeft = Math.round((expirationTime - now) / 1000);
-                    return interaction.editReply({
-                        content: `⏱️ Подождите ${timeLeft} секунд перед созданием нового тикета!`
-                    });
-                }
-            }
-            
-            // Check if user already has a ticket
-            const existingTicket = guild.channels.cache.find(
-                ch => ch.name.toLowerCase().includes(`тикет`) && ch.name.toLowerCase().includes(user.username.toLowerCase())
-            );
-            
-            if (existingTicket) {
-                return interaction.editReply({
-                    content: `❌ У вас уже есть открытый тикет: ${existingTicket}`
-                });
-            }
-            
-            // Set cooldown for this guild
-            guildCooldowns.set(user.id, now);
-            
-            try {
-                // Get category from environment
-                const categoryId = process.env.TICKET_CATEGORY_ID;
-                
-                if (!categoryId) {
-                    return interaction.editReply({
-                        content: '❌ Категория для тикетов не настроена! Установите TICKET_CATEGORY_ID'
-                    });
-                }
-                
-                let category = guild.channels.cache.get(categoryId);
-                
-                if (!category) {
-                    console.error('❌ Категория для тикетов не найдена!');
-                    return interaction.editReply({
-                        content: '❌ Ошибка: категория для тикетов не найдена!'
-                    });
-                }
-                
-                // Create ticket channel
-                const ticketChannel = await guild.channels.create({
-                    name: `тикет-${user.username}`,
-                    type: ChannelType.GuildText,
-                    parent: category.id,
-                    permissionOverwrites: [
-                        {
-                            id: guild.id,
-                            deny: [PermissionFlagsBits.ViewChannel]
-                        },
-                        {
-                            id: user.id,
-                            allow: [
-                                PermissionFlagsBits.ViewChannel,
-                                PermissionFlagsBits.SendMessages,
-                                PermissionFlagsBits.ReadMessageHistory
-                            ]
-                        },
-                        {
-                            id: client.user.id,
-                            allow: [
-                                PermissionFlagsBits.ViewChannel,
-                                PermissionFlagsBits.SendMessages,
-                                PermissionFlagsBits.ManageChannels
-                            ]
-                        }
-                    ]
-                });
-                
-                // Add support role if exists
-                const supportRoleId = process.env.SUPPORT_ROLE_ID;
-                if (supportRoleId) {
-                    const supportRole = guild.roles.cache.get(supportRoleId);
-                    if (supportRole) {
-                        await ticketChannel.permissionOverwrites.create(supportRoleId, {
-                            ViewChannel: true,
-                            SendMessages: true,
-                            ReadMessageHistory: true
-                        });
-                    }
-                }
-                
-                // Store ticket info
-                activeTickets.set(ticketChannel.id, {
-                    userId: user.id,
-                    createdAt: Date.now()
-                });
-                
-                // Create ticket embed
-                const ticketEmbed = new EmbedBuilder()
-                    .setColor('#00ff00')
-                    .setTitle('🎫 Тикет создан')
-                    .setDescription(
-                        `Привет, <@${user.id}>!\n\n` +
-                        'Опишите вашу проблему или вопрос.\n' +
-                        'Команда поддержки ответит вам как можно скорее.'
-                    )
-                    .setFooter({ text: `Тикет создан ${user.tag}`, iconURL: user.displayAvatarURL() })
-                    .setTimestamp();
-                
-                const closeButton = new ActionRowBuilder()
-                    .addComponents(
-                        new ButtonBuilder()
-                            .setCustomId('close_ticket')
-                            .setLabel('🔒 Закрыть тикет')
-                            .setStyle(ButtonStyle.Danger)
-                    );
-                
-                await ticketChannel.send({
-                    content: process.env.SUPPORT_ROLE_ID ? `<@&${process.env.SUPPORT_ROLE_ID}>` : '',
-                    embeds: [ticketEmbed],
-                    components: [closeButton]
-                });
-                
-                await interaction.editReply({
-                    content: `✅ Тикет создан: ${ticketChannel}`
-                });
-                
-            } catch (error) {
-                console.error('Error creating ticket:', error);
-                await interaction.editReply({
-                    content: '❌ Ошибка при создании тикета!'
-                });
-            }
+            await createTicket(interaction, client, 'regular');
+        }
+        
+        // Create payment ticket
+        if (customId === 'create_payment_ticket') {
+            await createTicket(interaction, client, 'payment');
         }
         
         // Close ticket
         if (customId === 'close_ticket') {
-            const channel = interaction.channel;
-            
-            // Check if this is a ticket channel
-            const isTicketChannel = channel.name.toLowerCase().includes('тикет');
-            
-            if (!isTicketChannel) {
-                return interaction.reply({
-                    content: '❌ Эта команда работает только в тикетах!',
-                    flags: 64
-                });
-            }
-            
-            await interaction.reply({
-                content: '🔒 Закрываю тикет...'
-            });
-            
-            // Log ticket closure
-            const logChannelId = process.env.MODERATION_LOG_CHANNEL;
-            if (logChannelId) {
-                const logChannel = guild.channels.cache.get(logChannelId);
-                if (logChannel) {
-                    const ticketInfo = activeTickets.get(channel.id);
-                    const logEmbed = new EmbedBuilder()
-                        .setColor('#ff0000')
-                        .setTitle('🔒 Тикет закрыт')
-                        .addFields(
-                            { name: 'Канал', value: channel.name, inline: true },
-                            { name: 'Закрыл', value: `<@${user.id}>`, inline: true },
-                            { name: 'Создатель', value: ticketInfo ? `<@${ticketInfo.userId}>` : 'Неизвестно', inline: true }
-                        )
-                        .setTimestamp();
-                    
-                    await logChannel.send({ embeds: [logEmbed] });
-                }
-            }
-            
-            // Delete ticket info
-            activeTickets.delete(channel.id);
-            
-            // Delete channel after 5 seconds
-            setTimeout(async () => {
-                try {
-                    await channel.delete();
-                } catch (error) {
-                    console.error('Error deleting ticket channel:', error);
-                }
-            }, 5000);
+            await closeTicket(interaction, client);
         }
     }
 };
+
+async function createTicket(interaction, client, type) {
+    const { user, guild } = interaction;
+    
+    await interaction.deferReply({ flags: 64 }); // 64 = ephemeral flag
+    
+    // Check cooldown per server
+    const now = Date.now();
+    const cooldownAmount = 30 * 1000; // 30 seconds
+    
+    // Get or create cooldown map for this guild
+    if (!ticketCooldowns.has(guild.id)) {
+        ticketCooldowns.set(guild.id, new Map());
+    }
+    const guildCooldowns = ticketCooldowns.get(guild.id);
+    
+    if (guildCooldowns.has(user.id)) {
+        const expirationTime = guildCooldowns.get(user.id) + cooldownAmount;
+        
+        if (now < expirationTime) {
+            const timeLeft = Math.round((expirationTime - now) / 1000);
+            return interaction.editReply({
+                content: `⏱️ Подождите ${timeLeft} секунд перед созданием нового тикета!`
+            });
+        }
+    }
+    
+    // Check if user already has a ticket
+    const existingTicket = guild.channels.cache.find(
+        ch => (ch.name.toLowerCase().includes(`тикет`) || ch.name.toLowerCase().includes(`выплата`)) && 
+              ch.name.toLowerCase().includes(user.username.toLowerCase())
+    );
+    
+    if (existingTicket) {
+        return interaction.editReply({
+            content: `❌ У вас уже есть открытый тикет: ${existingTicket}`
+        });
+    }
+    
+    // Set cooldown for this guild
+    guildCooldowns.set(user.id, now);
+    
+    try {
+        // Get category based on ticket type
+        const categoryId = type === 'payment' 
+            ? process.env.PAYMENT_TICKET_CATEGORY_ID 
+            : process.env.TICKET_CATEGORY_ID;
+        
+        if (!categoryId) {
+            return interaction.editReply({
+                content: '❌ Категория для тикетов не настроена!'
+            });
+        }
+        
+        let category = guild.channels.cache.get(categoryId);
+        
+        if (!category) {
+            console.error('❌ Категория для тикетов не найдена!');
+            return interaction.editReply({
+                content: '❌ Ошибка: категория для тикетов не найдена!'
+            });
+        }
+        
+        // Create ticket channel
+        const channelName = type === 'payment' 
+            ? `выплата-${user.username}` 
+            : `тикет-${user.username}`;
+        
+        const ticketChannel = await guild.channels.create({
+            name: channelName,
+            type: ChannelType.GuildText,
+            parent: category.id,
+            permissionOverwrites: [
+                {
+                    id: guild.id,
+                    deny: [PermissionFlagsBits.ViewChannel]
+                },
+                {
+                    id: user.id,
+                    allow: [
+                        PermissionFlagsBits.ViewChannel,
+                        PermissionFlagsBits.SendMessages,
+                        PermissionFlagsBits.ReadMessageHistory
+                    ]
+                },
+                {
+                    id: client.user.id,
+                    allow: [
+                        PermissionFlagsBits.ViewChannel,
+                        PermissionFlagsBits.SendMessages,
+                        PermissionFlagsBits.ManageChannels
+                    ]
+                }
+            ]
+        });
+        
+        // Add support role if exists
+        const supportRoleId = process.env.SUPPORT_ROLE_ID;
+        if (supportRoleId) {
+            const supportRole = guild.roles.cache.get(supportRoleId);
+            if (supportRole) {
+                await ticketChannel.permissionOverwrites.create(supportRoleId, {
+                    ViewChannel: true,
+                    SendMessages: true,
+                    ReadMessageHistory: true
+                });
+            }
+        }
+        
+        // Store ticket info
+        activeTickets.set(ticketChannel.id, {
+            userId: user.id,
+            createdAt: Date.now(),
+            type: type
+        });
+        
+        // Create ticket embed based on type
+        let ticketEmbed;
+        
+        if (type === 'payment') {
+            ticketEmbed = new EmbedBuilder()
+                .setColor('#FFD700')
+                .setTitle('💰 Тикет на выплату создан')
+                .setDescription(
+                    `Привет, <@${user.id}>!\n\n` +
+                    '**Для получения выплаты укажите:**\n' +
+                    '• Ваш никнейм\n' +
+                    '• Сумму выплаты\n' +
+                    '• Подтверждение (скриншоты/ссылки)\n\n' +
+                    'Администрация рассмотрит вашу заявку в ближайшее время.'
+                )
+                .setFooter({ text: `Тикет создан ${user.tag}`, iconURL: user.displayAvatarURL() })
+                .setTimestamp();
+        } else {
+            ticketEmbed = new EmbedBuilder()
+                .setColor('#00ff00')
+                .setTitle('🎫 Тикет создан')
+                .setDescription(
+                    `Привет, <@${user.id}>!\n\n` +
+                    'Опишите вашу проблему или вопрос.\n' +
+                    'Команда поддержки ответит вам как можно скорее.'
+                )
+                .setFooter({ text: `Тикет создан ${user.tag}`, iconURL: user.displayAvatarURL() })
+                .setTimestamp();
+        }
+        
+        const closeButton = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('close_ticket')
+                    .setLabel('🔒 Закрыть тикет')
+                    .setStyle(ButtonStyle.Danger)
+            );
+        
+        await ticketChannel.send({
+            content: supportRoleId ? `<@&${supportRoleId}>` : '',
+            embeds: [ticketEmbed],
+            components: [closeButton]
+        });
+        
+        await interaction.editReply({
+            content: `✅ Тикет создан: ${ticketChannel}`
+        });
+        
+    } catch (error) {
+        console.error('Error creating ticket:', error);
+        await interaction.editReply({
+            content: '❌ Ошибка при создании тикета!'
+        });
+    }
+}
+
+async function closeTicket(interaction, client) {
+    const { user, guild, channel } = interaction;
+    
+    // Check if this is a ticket channel
+    const isTicketChannel = channel.name.toLowerCase().includes('тикет') || 
+                           channel.name.toLowerCase().includes('выплата');
+    
+    if (!isTicketChannel) {
+        return interaction.reply({
+            content: '❌ Эта команда работает только в тикетах!',
+            flags: 64
+        });
+    }
+    
+    await interaction.reply({
+        content: '🔒 Закрываю тикет...'
+    });
+    
+    // Log ticket closure
+    const logChannelId = process.env.MODERATION_LOG_CHANNEL;
+    if (logChannelId) {
+        const logChannel = guild.channels.cache.get(logChannelId);
+        if (logChannel) {
+            const ticketInfo = activeTickets.get(channel.id);
+            const logEmbed = new EmbedBuilder()
+                .setColor('#ff0000')
+                .setTitle('🔒 Тикет закрыт')
+                .addFields(
+                    { name: 'Канал', value: channel.name, inline: true },
+                    { name: 'Закрыл', value: `<@${user.id}>`, inline: true },
+                    { name: 'Создатель', value: ticketInfo ? `<@${ticketInfo.userId}>` : 'Неизвестно', inline: true }
+                )
+                .setTimestamp();
+            
+            await logChannel.send({ embeds: [logEmbed] });
+        }
+    }
+    
+    // Delete ticket info
+    activeTickets.delete(channel.id);
+    
+    // Delete channel after 5 seconds
+    setTimeout(async () => {
+        try {
+            await channel.delete();
+        } catch (error) {
+            console.error('Error deleting ticket channel:', error);
+        }
+    }, 5000);
+}
