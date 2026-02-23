@@ -12,7 +12,7 @@ module.exports = {
         
         // Create ticket
         if (customId === 'create_ticket') {
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: 64 }); // 64 = ephemeral flag
             
             // Check cooldown per server
             const now = Date.now();
@@ -98,12 +98,16 @@ module.exports = {
                 });
                 
                 // Add support role if exists
-                if (process.env.SUPPORT_ROLE_ID) {
-                    await ticketChannel.permissionOverwrites.create(process.env.SUPPORT_ROLE_ID, {
-                        ViewChannel: true,
-                        SendMessages: true,
-                        ReadMessageHistory: true
-                    });
+                const supportRoleId = process.env.SUPPORT_ROLE_ID;
+                if (supportRoleId) {
+                    const supportRole = guild.roles.cache.get(supportRoleId);
+                    if (supportRole) {
+                        await ticketChannel.permissionOverwrites.create(supportRoleId, {
+                            ViewChannel: true,
+                            SendMessages: true,
+                            ReadMessageHistory: true
+                        });
+                    }
                 }
                 
                 // Store ticket info
@@ -160,7 +164,7 @@ module.exports = {
             if (!isTicketChannel) {
                 return interaction.reply({
                     content: '❌ Эта команда работает только в тикетах!',
-                    ephemeral: true
+                    flags: 64
                 });
             }
             
